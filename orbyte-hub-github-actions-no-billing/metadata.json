@@ -1,0 +1,6 @@
+{
+  "name": "Orbyte Hub",
+  "description": "Comprehensive Malaysian SME e-Invoice and statutory tax compliance hub with role-based access control, LHDN guidelines, and multi-company management.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

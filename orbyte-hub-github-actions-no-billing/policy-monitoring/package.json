@@ -1,0 +1,9 @@
+{
+  "name": "orbyte-policy-monitor-runtime",
+  "private": true,
+  "type": "module",
+  "description": "Isolated dependency set for scheduled official policy-document monitoring.",
+  "dependencies": {
+    "pdf-parse": "2.4.5"
+  }
+}

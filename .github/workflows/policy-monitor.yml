@@ -1,55 +1,128 @@
-name: Orbyte Policy Monitor
+name: Orbyte Official Policy Monitor
 
 on:
   workflow_dispatch:
+    inputs:
+      acknowledge_reviewed_changes:
+        description: "Acknowledge reviewed pending document hashes (does not activate rules)"
+        required: false
+        type: boolean
+        default: false
   schedule:
+    # 12:00 and 00:00 Asia/Kuala_Lumpur (UTC+8)
     - cron: "0 4,16 * * *"
 
 permissions:
-  contents: read
+  contents: write
+
+# Avoid two monitor runs trying to update the saved state at the same time.
+concurrency:
+  group: orbyte-policy-monitor-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   monitor:
     runs-on: ubuntu-latest
-
-    defaults:
-      run:
-        working-directory: ./orbyte-hub-github-actions-no-billing
+    timeout-minutes: 15
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v5
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
         with:
           node-version: 22
 
-      - name: Install dependencies
-        run: npm install
+      - name: Locate policy monitor
+        id: paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          SCRIPT=$(find . -type f -path '*/policy-monitoring/policy_monitor_github.mjs' -print -quit)
+          if [ -z "$SCRIPT" ]; then
+            echo "::error::Could not find policy-monitoring/policy_monitor_github.mjs in the repository."
+            find . -maxdepth 5 -type f | head -200
+            exit 1
+          fi
+          PROJECT_DIR="${SCRIPT%/policy-monitoring/policy_monitor_github.mjs}"
+          echo "script=$SCRIPT" >> "$GITHUB_OUTPUT"
+          echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
+          echo "Found monitor script: $SCRIPT"
+          test -s "$PROJECT_DIR/policy-monitoring/package.json"
+          test -s "$PROJECT_DIR/policy-monitoring/state.json"
 
-      - name: Run policy monitor
+      - name: Install monitor-only dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install \
+            --prefix "${{ steps.paths.outputs.project_dir }}/policy-monitoring" \
+            --no-package-lock --no-audit --no-fund
+
+      - name: Check official portals and download/compare guideline PDFs
         id: monitor
-        continue-on-error: true
+        shell: bash
+        env:
+          ACKNOWLEDGE_POLICY_CHANGES: ${{ inputs.acknowledge_reviewed_changes && 'true' || 'false' }}
         run: |
-          node scripts/policy-monitor.mjs
-          echo "Monitor exit code: $?"
+          set +e
+          node "${{ steps.paths.outputs.script }}"
+          code=$?
+          echo "monitor_exit_code=$code" >> "$GITHUB_OUTPUT"
+          if [ "$code" -eq 2 ]; then
+            echo "::warning::One or more official source checks need attention. The report and last-known-good snapshots will still be saved."
+            exit 0
+          fi
+          if [ "$code" -ne 0 ]; then
+            echo "::error::The policy monitor encountered a fatal error (exit code $code)."
+            exit "$code"
+          fi
 
-      - name: Verify monitoring output
+      - name: Verify status, report and state were generated
+        shell: bash
         run: |
-          test -f public/policy-monitoring/status.json
-          test -f public/policy-monitoring/latest-report.md
+          set -euo pipefail
+          PROJECT_DIR="${{ steps.paths.outputs.project_dir }}"
+          test -s "$PROJECT_DIR/public/policy-monitoring/status.json"
+          test -s "$PROJECT_DIR/public/policy-monitoring/latest-report.md"
+          test -s "$PROJECT_DIR/policy-monitoring/state.json"
+          echo "Monitoring outputs generated:"
+          ls -lh \
+            "$PROJECT_DIR/public/policy-monitoring/status.json" \
+            "$PROJECT_DIR/public/policy-monitoring/latest-report.md" \
+            "$PROJECT_DIR/policy-monitoring/state.json"
 
-          echo "Monitoring output found:"
-          ls -lh public/policy-monitoring/
-
-      - name: Upload monitoring results
+      - name: Upload report artifact for each run
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: orbyte-policy-monitoring-${{ github.run_number }}
+          name: orbyte-policy-monitor-${{ github.run_number }}
           path: |
-            orbyte-hub-github-actions-no-billing/public/policy-monitoring/status.json
-            orbyte-hub-github-actions-no-billing/public/policy-monitoring/latest-report.md
-            orbyte-hub-github-actions-no-billing/public/policy-monitoring/state.json
+            ${{ steps.paths.outputs.project_dir }}/public/policy-monitoring/status.json
+            ${{ steps.paths.outputs.project_dir }}/public/policy-monitoring/latest-report.md
           if-no-files-found: warn
           retention-days: 30
+
+      - name: Save state and latest report back to the repository
+        shell: bash
+        env:
+          PROJECT_DIR: ${{ steps.paths.outputs.project_dir }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -- \
+            "$PROJECT_DIR/policy-monitoring/state.json" \
+            "$PROJECT_DIR/public/policy-monitoring/status.json" \
+            "$PROJECT_DIR/public/policy-monitoring/latest-report.md"
+
+          if git diff --cached --quiet; then
+            echo "No monitoring output changes to save."
+            exit 0
+          fi
+
+          git commit -m "chore(policy-monitor): update official source status"
+          # Rebase on any commit added after checkout; do not force-push.

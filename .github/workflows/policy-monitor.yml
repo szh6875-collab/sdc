@@ -1,0 +1,98 @@
+name: Orbyte Official Policy Monitor
+
+on:
+  schedule:
+    - cron: '0 4,16 * * *'
+  workflow_dispatch:
+    inputs:
+      acknowledge_detected_changes:
+        description: 'Clear reviewed change flags only'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: orbyte-policy-monitor
+  cancel-in-progress: false
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Find project and monitor official sources
+        env:
+          ACKNOWLEDGE_POLICY_CHANGES: ${{ inputs.acknowledge_detected_changes || false }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SCRIPT=$(find . -type f \
+            -path '*/policy-monitoring/policy_monitor_github.mjs' \
+            -print -quit)
+
+          if [ -z "$SCRIPT" ]; then
+            echo "::error::Policy monitor script not found. Check that the project files were uploaded and extracted."
+            exit 1
+          fi
+
+          PROJECT_DIR="${SCRIPT%/policy-monitoring/policy_monitor_github.mjs}"
+
+          if [ ! -f "$PROJECT_DIR/policy-monitoring/package.json" ]; then
+            echo "::error::Policy monitor package.json not found."
+            exit 1
+          fi
+
+          echo "Project directory: $PROJECT_DIR"
+
+          npm install \
+            --prefix "$PROJECT_DIR/policy-monitoring" \
+            --no-package-lock \
+            --no-audit \
+            --no-fund
+
+          node "$SCRIPT"
+
+      - name: Save monitoring results
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SCRIPT=$(find . -type f \
+            -path '*/policy-monitoring/policy_monitor_github.mjs' \
+            -print -quit)
+
+          if [ -z "$SCRIPT" ]; then
+            echo "Monitor script unavailable; nothing to commit."
+            exit 0
+          fi
+
+          PROJECT_DIR="${SCRIPT%/policy-monitoring/policy_monitor_github.mjs}"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add -- \
+            "$PROJECT_DIR/policy-monitoring/state.json" \
+            "$PROJECT_DIR/public/policy-monitoring/status.json" \
+            "$PROJECT_DIR/public/policy-monitoring/latest-report.md"
+
+          if ! git diff --cached --quiet; then
+            git commit -m "chore(policy-monitor): update official source status"
+            git push origin "HEAD:${GITHUB_REF_NAME}"
+          else
+            echo "No monitoring output changes."
+          fi

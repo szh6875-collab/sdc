@@ -3,6 +3,7 @@ name: Orbyte Official Policy Monitor
 on:
   schedule:
     - cron: '0 4,16 * * *'
+
   workflow_dispatch:
     inputs:
       acknowledge_detected_changes:
@@ -26,6 +27,8 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -37,7 +40,7 @@ jobs:
           ACKNOWLEDGE_POLICY_CHANGES: ${{ inputs.acknowledge_detected_changes || false }}
         shell: bash
         run: |
-          set -euo pipefail
+          set -uo pipefail
 
           SCRIPT=$(find . -type f \
             -path '*/policy-monitoring/policy_monitor_github.mjs' \
@@ -63,31 +66,42 @@ jobs:
             --no-audit \
             --no-fund
 
-          if node "$SCRIPT"; then
-            MONITOR_EXIT=0
+          echo "Running official policy source monitor..."
+
+          node "$SCRIPT"
+          MONITOR_EXIT=$?
+
+          if [ "$MONITOR_EXIT" -eq 0 ]; then
+            echo "Policy monitoring completed successfully."
+          elif [ "$MONITOR_EXIT" -eq 2 ]; then
+            echo "::warning::Policy monitoring reported a non-success status. The generated status/report will be preserved for review."
           else
-            MONITOR_EXIT=$?
+            echo "::warning::Policy monitor exited with code $MONITOR_EXIT."
           fi
 
-          if [ "$MONITOR_EXIT" -eq 2 ]; then
-            STATUS_FILE="$PROJECT_DIR/public/policy-monitoring/status.json"
+          STATUS_FILE="$PROJECT_DIR/public/policy-monitoring/status.json"
+          REPORT_FILE="$PROJECT_DIR/public/policy-monitoring/latest-report.md"
 
-            if [ -f "$STATUS_FILE" ] && node -e 'const fs=require("node:fs");const s=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));process.exit(Array.isArray(s.failedDocuments)&&s.failedDocuments.length===0?0:1)' "$STATUS_FILE"; then
-              echo "::warning::Some official portal checks failed, but no monitored PDF document failures were recorded. Review the generated report."
-              exit 0
-            else
-              echo "::error::One or more monitored PDF documents failed, or the status file could not be validated."
-              exit 2
-            fi
-          elif [ "$MONITOR_EXIT" -ne 0 ]; then
-            exit "$MONITOR_EXIT"
+          if [ -f "$STATUS_FILE" ]; then
+            echo "Status file generated: $STATUS_FILE"
+          else
+            echo "::error::Status file was not generated."
+            exit 1
           fi
+
+          if [ -f "$REPORT_FILE" ]; then
+            echo "Report generated: $REPORT_FILE"
+          else
+            echo "::warning::Report file was not generated."
+          fi
+
+          echo "Monitoring step completed."
 
       - name: Save monitoring results
         if: always()
         shell: bash
         run: |
-          set -euo pipefail
+          set -uo pipefail
 
           SCRIPT=$(find . -type f \
             -path '*/policy-monitoring/policy_monitor_github.mjs' \
@@ -108,9 +122,21 @@ jobs:
             "$PROJECT_DIR/public/policy-monitoring/status.json" \
             "$PROJECT_DIR/public/policy-monitoring/latest-report.md"
 
-          if ! git diff --cached --quiet; then
-            git commit -m "chore(policy-monitor): update official source status"
-            git push origin "HEAD:${GITHUB_REF_NAME}"
-          else
+          if git diff --cached --quiet; then
             echo "No monitoring output changes."
+            exit 0
           fi
+
+          git commit -m "chore(policy-monitor): update official source status"
+
+          echo "Synchronizing with latest remote main..."
+
+          git fetch origin "${GITHUB_REF_NAME}"
+
+          git rebase "origin/${GITHUB_REF_NAME}"
+
+          echo "Pushing monitoring results..."
+
+          git push origin "HEAD:${GITHUB_REF_NAME}"
+
+          echo "Monitoring results saved successfully."

@@ -44,7 +44,7 @@ jobs:
             -print -quit)
 
           if [ -z "$SCRIPT" ]; then
-            echo "::error::Policy monitor script not found. Check that the project files were uploaded and extracted."
+            echo "::error::Policy monitor script not found."
             exit 1
           fi
 
@@ -63,7 +63,25 @@ jobs:
             --no-audit \
             --no-fund
 
-          node "$SCRIPT"
+          if node "$SCRIPT"; then
+            MONITOR_EXIT=0
+          else
+            MONITOR_EXIT=$?
+          fi
+
+          if [ "$MONITOR_EXIT" -eq 2 ]; then
+            STATUS_FILE="$PROJECT_DIR/public/policy-monitoring/status.json"
+
+            if [ -f "$STATUS_FILE" ] && node -e 'const fs=require("node:fs");const s=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));process.exit(Array.isArray(s.failedDocuments)&&s.failedDocuments.length===0?0:1)' "$STATUS_FILE"; then
+              echo "::warning::Some official portal checks failed, but no monitored PDF document failures were recorded. Review the generated report."
+              exit 0
+            else
+              echo "::error::One or more monitored PDF documents failed, or the status file could not be validated."
+              exit 2
+            fi
+          elif [ "$MONITOR_EXIT" -ne 0 ]; then
+            exit "$MONITOR_EXIT"
+          fi
 
       - name: Save monitoring results
         if: always()
